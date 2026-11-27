@@ -24,6 +24,7 @@ param(
     [string]$Victory = '',
     [string]$TweakDir = '',
     [string]$CacheRoot = '',
+    [string]$DataDir = '',
     [ValidateSet('On', 'Ready', 'Off')]
     [string]$FrameGen = 'On',
     [ValidateSet('off', 'dlaa', 'quality', 'balanced', 'performance')]
@@ -55,6 +56,95 @@ function Find-VictoryRepoRoot([string]$startPath) {
         $cur = $parent
     }
     return $null
+}
+
+# Repairs misplaced or double-nested save containers (e.g. SARC0000~f3a9b4e1a0576c96 pasted
+# directly into saves\ or saves\0009000000000001\ instead of saves\0009000000000001\<scid>\).
+function Repair-VictorySaves([string]$dataRoot, [string]$titleGameDir) {
+    if (-not (Test-Path -LiteralPath $dataRoot)) { return }
+    function Normalize-Container([string]$cPath) {
+        $cName = Split-Path $cPath -Leaf
+        $nested = Join-Path $cPath $cName
+        if (Test-Path -LiteralPath $nested) {
+            Get-ChildItem -LiteralPath $nested -Force | ForEach-Object {
+                $dest = Join-Path $cPath $_.Name
+                if (-not (Test-Path -LiteralPath $dest)) { Move-Item -LiteralPath $_.FullName -Destination $dest -Force }
+            }
+            Remove-Item -LiteralPath $nested -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $hasVer = [bool](Get-ChildItem -LiteralPath $cPath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^v[1-9]\d*$' } | Select-Object -First 1)
+        if (-not $hasVer -and (Test-Path -LiteralPath (Join-Path $cPath 'manifest'))) {
+            $v1 = Join-Path $cPath 'v1'
+            New-Item -ItemType Directory -Force -Path $v1 | Out-Null
+            Get-ChildItem -LiteralPath $cPath -File -Force | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination (Join-Path $v1 $_.Name) -Force
+            }
+        }
+    }
+    $scidHint = $null
+    $mgc = Join-Path $titleGameDir 'MicrosoftGame.config'
+    if (Test-Path -LiteralPath $mgc) {
+        $xmlText = Get-Content -LiteralPath $mgc -Raw -ErrorAction SilentlyContinue
+        if ($xmlText -match '<ServiceConfigId>\s*([^<\s]+)\s*</ServiceConfigId>') {
+            $rawScid = $Matches[1]
+            $scidHint = -join ($rawScid.ToCharArray() | ForEach-Object {
+                $b = [int][char]$_
+                if (($b -ge 65 -and $b -le 90) -or ($b -ge 97 -and $b -le 122) -or ($b -ge 48 -and $b -le 57) -or $b -eq 45 -or $b -eq 95) { $_ }
+                else { '%{0:X2}' -f $b }
+            })
+        }
+    }
+    foreach ($titleFolder in (Get-ChildItem -LiteralPath $dataRoot -Directory -ErrorAction SilentlyContinue)) {
+        $savesDir = Join-Path $titleFolder.FullName 'saves'
+        if (-not (Test-Path -LiteralPath $savesDir)) { continue }
+        $xuidDir = Join-Path $savesDir '0009000000000001'
+        New-Item -ItemType Directory -Force -Path $xuidDir | Out-Null
+        $scidDirs = @(Get-ChildItem -LiteralPath $xuidDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*~*' -and $_.Name -notmatch '^v\d+$' -and $_.Name -ne '_imported_backups' } | ForEach-Object { $_.FullName })
+        $defDir = Join-Path $xuidDir 'default'
+        if ($scidDirs -notcontains $defDir) {
+            New-Item -ItemType Directory -Force -Path $defDir | Out-Null
+            $scidDirs += $defDir
+        }
+        if ($scidHint -and $scidHint -ne 'default') {
+            $hintDir = Join-Path $xuidDir $scidHint
+            if ($scidDirs -notcontains $hintDir) {
+                New-Item -ItemType Directory -Force -Path $hintDir | Out-Null
+                $scidDirs += $hintDir
+            }
+        }
+        # Any *~* container sitting directly in saves\ or saves\0009000000000001\ was manually
+        # pasted by the user 1-2 levels too high: import it into every SCID folder once, then archive the stray copy.
+        $misplaced = @()
+        $misplaced += Get-ChildItem -LiteralPath $savesDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*~*' }
+        $misplaced += Get-ChildItem -LiteralPath $xuidDir  -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*~*' }
+        $backupRoot = Join-Path $titleFolder.FullName 'save-backups'
+        foreach ($m in $misplaced) {
+            if (-not (Test-Path -LiteralPath $m.FullName)) { continue }
+            Normalize-Container $m.FullName
+            $hasValidVer = [bool](Get-ChildItem -LiteralPath $m.FullName -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^v[1-9]\d*$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'manifest')) } | Select-Object -First 1)
+            if (-not $hasValidVer) { continue }
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            foreach ($targetScid in $scidDirs) {
+                $dest = Join-Path $targetScid $m.Name
+                if (Test-Path -LiteralPath $dest) {
+                    New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+                    $scidLeaf = Split-Path $targetScid -Leaf
+                    Copy-Item -LiteralPath $dest -Destination (Join-Path $backupRoot "$($m.Name)-$scidLeaf-$stamp") -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Copy-Item -LiteralPath $m.FullName -Destination $dest -Recurse -Force
+                Say "Imported save container '$($m.Name)' -> $dest" Green
+            }
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            $archived = Join-Path $backupRoot "imported-$($m.Name)-$stamp-$([Guid]::NewGuid().ToString('N').Substring(0,4))"
+            Move-Item -LiteralPath $m.FullName -Destination $archived -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($targetScid in $scidDirs) {
+            Get-ChildItem -LiteralPath $targetScid -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*~*' } | ForEach-Object {
+                Normalize-Container $_.FullName
+            }
+        }
+    }
 }
 
 function Get-PeImports([string]$pePath) {
@@ -201,7 +291,14 @@ if (-not $CacheRoot -or (Find-VictoryRepoRoot $CacheRoot)) {
 }
 $build = (Get-FileHash -LiteralPath $Victory -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
 $cacheDir = Join-Path $CacheRoot "build-$build"
-$dataDir  = Join-Path $storageBase 'data'
+# Use the standard shared %LOCALAPPDATA%\victory\data folder by default so existing saves from
+# all VIctory builds work automatically (override only if -DataDir is explicitly provided).
+$victoryAppData = Join-Path $env:LOCALAPPDATA 'victory'
+if ($DataDir -and -not (Find-VictoryRepoRoot $DataDir)) {
+    $dataDir = $DataDir
+} else {
+    $dataDir = Join-Path $victoryAppData 'data'
+}
 $slRoot   = Join-Path $victoryDir 'nvidia-sdk'
 $slDir    = Join-Path $slRoot 'Streamline\bin\x64'
 if (-not (Test-Path -LiteralPath (Join-Path $slDir 'sl.interposer.dll')) -and (Test-Path -LiteralPath (Join-Path $repoRoot 'nvidia-sdk\Streamline\bin\x64\sl.interposer.dll'))) {
@@ -216,6 +313,7 @@ Say "game        : $Exe $(if ($hasArchives) { '(archives found)' } else { '(WARN
 Say "Streamline  : $(if (Test-Path -LiteralPath (Join-Path $slDir 'sl.interposer.dll')) { 'present' } else { 'will fetch once (~70 MB)' })"
 Say "FG proxy    : $(if (Test-Path -LiteralPath (Join-Path $victoryDir $chosenProxy)) { "$chosenProxy installed beside victory.exe" } else { 'will check TweakDir / Downloads' })"
 Say "shader cache: $cacheDir $(if ($shadersOk -and -not $Fresh) { '(ready)' } else { '(fresh compile on start)' })"
+Say "saves (data): $dataDir"
 Say "mode        : $(if ($SeriesX) { 'Series X' } else { 'Series S (4 GB VRAM sweet spot)' }) | DLSS $Dlss | Base $Fps FPS | FrameGen $FrameGen"
 if ($Check) { exit 0 }
 
@@ -290,8 +388,9 @@ Mode=On
     }
 }
 
-# 7. Per-build shader cache isolation + fresh shader compile
+# 7. Per-build shader cache isolation + save auto-repair + fresh shader compile
 New-Item -ItemType Directory -Force -Path $CacheRoot, $dataDir | Out-Null
+Repair-VictorySaves $dataDir $gameDir
 if ($Fresh -and (Test-Path -LiteralPath $cacheDir)) {
     Remove-Item -LiteralPath $cacheDir -Recurse -Force
     $shadersOk = $false
@@ -299,7 +398,6 @@ if ($Fresh -and (Test-Path -LiteralPath $cacheDir)) {
 Get-ChildItem -LiteralPath $CacheRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'build-*' -and $_.Name -ne "build-$build" } | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
-$victoryAppData = Join-Path $env:LOCALAPPDATA 'victory'
 if (Test-Path -LiteralPath (Join-Path $victoryAppData 'cache')) {
     Remove-Item -LiteralPath (Join-Path $victoryAppData 'cache') -Recurse -Force -ErrorAction SilentlyContinue
 }
