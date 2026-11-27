@@ -401,6 +401,7 @@ impl LoadedImage {
                     // SAFETY: forwarded from the caller of `spawn_main`.
                     unsafe { dll.attach() }.with_context(|| format!("attaching {name}"))?;
                 }
+                crate::crash::set_title_base(self.base());
                 // SAFETY: forwarded from the caller of `spawn_main`.
                 unsafe { self.run_tls_callbacks(DLL_PROCESS_ATTACH) };
                 crate::threads::attached(self.base());

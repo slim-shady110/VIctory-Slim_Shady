@@ -466,7 +466,68 @@ unsafe fn sse4a(code: *const u8, xmm: &mut [M128A; 16]) -> Option<usize> {
     Some(len)
 }
 
+/// The title image's base, once it is mapped (0 before).
+static TITLE_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Tells the handler where the title image is mapped.
+pub fn set_title_base(base: usize) {
+    TITLE_BASE.store(base, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Return addresses (title RVAs) of the title's `memcpy` calls whose source may
+/// come out empty in "Gone Fishing" (`VICTORY_SCRIPT_NULL_COPY=0` disables).
+const NULL_COPY_SITES: [usize; 1] = [0x3de_6491];
+
+fn null_copy_guard() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SCRIPT_NULL_COPY").is_none_or(|v| v != "0"))
+}
+
+unsafe fn null_copy(info: *mut EXCEPTION_POINTERS) -> bool {
+    let base = TITLE_BASE.load(std::sync::atomic::Ordering::Relaxed);
+    if base == 0 || !null_copy_guard() {
+        return false;
+    }
+    // SAFETY: the system passes valid exception pointers.
+    let (record, context) = unsafe { (&*(*info).ExceptionRecord, &mut *(*info).ContextRecord) };
+    if record.ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+        || record.NumberParameters < 2
+        || record.ExceptionInformation[0] != 0
+        || record.ExceptionInformation[1] >= 0x1_0000
+        || context.R8 > 0x20
+        || context.Rcx < 0x1_0000
+    {
+        return false;
+    }
+    // SAFETY: rsp of the faulting thread; its stack is mapped.
+    let back = unsafe { (context.Rsp as *const u64).read() } as usize;
+    if !NULL_COPY_SITES.iter().any(|&rva| back == base + rva) {
+        return false;
+    }
+    // SAFETY: the destination is the script stack slot the title was about to write `r8` bytes to.
+    unsafe { std::ptr::write_bytes(context.Rcx as *mut u8, 0, context.R8 as usize) };
+    context.Rax = context.Rcx;
+    context.Rip = back as u64;
+    context.Rsp += 8;
+    static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n < 8 || n.is_power_of_two() {
+        eprintln!(
+            "VIctory: the title's script copied {} bytes from {:#x} (an empty object) at title+{:#x}: zeros given instead ({} so far; VICTORY_SCRIPT_NULL_COPY=0 turns this off)",
+            context.R8,
+            record.ExceptionInformation[1],
+            back - base,
+            n + 1
+        );
+    }
+    true
+}
+
 unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
+    // SAFETY: the system passes valid exception pointers.
+    if unsafe { null_copy(info) } {
+        return -1; // EXCEPTION_CONTINUE_EXECUTION
+    }
     // an instruction of the console's CPU this one lacks: emulated, the title goes on
     // SAFETY: the system passes valid exception pointers.
     if unsafe { (*(*info).ExceptionRecord).ExceptionCode } == EXCEPTION_ILLEGAL_INSTRUCTION {

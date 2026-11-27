@@ -451,6 +451,12 @@ fn sweep() {
     }
     #[cfg(feature = "diagnostics")]
     crate::book::check();
+    sweep_now();
+}
+
+/// Immediate memory reclamation on `E_OUTOFMEMORY` (e.g. closing a command list
+/// on 4 GB VRAM systems), bypassing [`sweep`]'s 1-second throttle.
+fn sweep_now() {
     crate::residency::refresh();
     if crate::residency::pressured() {
         trim_spare_chunks();
@@ -6485,10 +6491,20 @@ impl HostList {
             }
         }
         // SAFETY: our list.
-        if let Err(e) = unsafe { self.list.Close() } {
-            fail(format_args!(
+        match unsafe { self.list.Close() } {
+            Ok(()) => {}
+            Err(e) if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY => {
+                trim_spare_chunks();
+                sweep_now();
+                if let Err(e) = unsafe { self.list.Close() } {
+                    fail(format_args!(
+                        "a host command list did not close ({e}): a command recorded into it was invalid"
+                    ));
+                }
+            }
+            Err(e) => fail(format_args!(
                 "a host command list did not close ({e}): a command recorded into it was invalid"
-            ));
+            )),
         }
     }
 
@@ -9703,8 +9719,8 @@ impl Meter {
         let Some(caption) = &self.caption else { return };
         // With frame generation showing more frames than are rendered, both rates.
         let text = match crate::streamline::shown_per_frame() {
-            1 => format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame"),
-            per => format!(" | VIctory {fps:.0} fps (frame gen {:.0} fps) {ms:.1} ms/frame {draws:.0} draws/frame", fps * f64::from(per)),
+            1 => format!(" | VIctory-Slim_Shady {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame"),
+            per => format!(" | VIctory-Slim_Shady {fps:.0} fps (frame gen {:.0} fps) {ms:.1} ms/frame {draws:.0} draws/frame", fps * f64::from(per)),
         };
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
@@ -10626,7 +10642,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
-            w!("VIctory"),
+            w!("VIctory-Slim_Shady"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

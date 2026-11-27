@@ -195,9 +195,12 @@ fn default_card_limits_mb(local_vram_budget: Option<u64>) -> (u64, u64) {
         return (16, 512);
     };
     let budget_mb = budget_bytes >> 20;
+    const FIVE_GIB_MB: u64 = 5 * 1024;
     const TWELVE_GIB_MB: u64 = 12 * 1024;
     const TWENTY_GIB_MB: u64 = 20 * 1024;
-    if budget_mb <= TWELVE_GIB_MB {
+    if budget_mb <= FIVE_GIB_MB {
+        (4, 384)
+    } else if budget_mb <= TWELVE_GIB_MB {
         (16, (budget_mb * 18 / 100).clamp(512, 2048))
     } else if budget_mb < TWENTY_GIB_MB {
         (4, 2048)
@@ -5745,10 +5748,12 @@ mod window_tests {
         const GIB: u64 = 1 << 30;
         const MIB: u64 = 1 << 20;
 
-        // Unknown (WARP / query failure): the old baseline. <= 12 GiB: 18% of
-        // the budget, 512 to 2048 MiB.
+        // Unknown (WARP / query failure): the old baseline. <= 5 GiB (4-6 GB cards):
+        // (4, 384) MiB. > 5 GiB ..= 12 GiB: 18% of the budget, 512 to 2048 MiB.
         assert_eq!(default_card_limits_mb(None), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(2 * GIB)), (16, 512));
+        assert_eq!(default_card_limits_mb(Some(2 * GIB)), (4, 384));
+        assert_eq!(default_card_limits_mb(Some(3 * GIB)), (4, 384));
+        assert_eq!(default_card_limits_mb(Some(5 * GIB)), (4, 384));
         assert_eq!(default_card_limits_mb(Some(8 * GIB)), (16, 1474));
         assert_eq!(default_card_limits_mb(Some(11229 * MIB)), (16, 2021));
         assert_eq!(default_card_limits_mb(Some(12 * GIB)), (16, 2048));

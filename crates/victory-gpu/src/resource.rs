@@ -1859,14 +1859,28 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
 /// for targets against a line of 9,527 MB). The reserve comes back when
 /// the targets grow by 64 MiB again (a new scene's), for as long again.
 #[cfg(windows)]
+fn default_targets_room_mb(local_vram_budget: Option<u64>) -> u64 {
+    if local_vram_budget.is_some_and(|b| b <= (5u64 << 30)) {
+        768
+    } else if local_vram_budget.is_some_and(|b| b <= (10u64 << 30)) {
+        1536
+    } else {
+        3072
+    }
+}
+
+#[cfg(windows)]
 pub(crate) fn targets_room_kept() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
     static MOST: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| {
+        let budget = crate::host::host().and_then(|h| h.video_memory()).map(|[b, ..]| b);
         std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_MB")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(3072 << 20, |mb| mb.min(8192) << 20)
+            .unwrap_or_else(|| default_targets_room_mb(budget))
+            .min(8192)
+            << 20
     });
     static SETTLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let settle = *SETTLE.get_or_init(|| {
