@@ -46,6 +46,17 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 function Say([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color }
 
+function Find-VictoryRepoRoot([string]$startPath) {
+    $cur = $startPath
+    while ($cur) {
+        if (Test-Path -LiteralPath (Join-Path $cur '.victory-root')) { return $cur }
+        $parent = Split-Path $cur
+        if (-not $parent -or $parent -eq $cur) { break }
+        $cur = $parent
+    }
+    return $null
+}
+
 function Get-PeImports([string]$pePath) {
     $bytes = [IO.File]::ReadAllBytes($pePath)
     $pe = [BitConverter]::ToInt32($bytes, 0x3C)
@@ -154,6 +165,11 @@ if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) {
 }
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
 $gameDir = Split-Path $Exe
+$gameInRepo = Find-VictoryRepoRoot $gameDir
+if ($gameInRepo) {
+    Say "Game folder '$gameDir' is inside the VIctory repository '$gameInRepo'. Move your game dump outside the repository folder and try again." Red
+    exit 1
+}
 $hasArchives = [bool](Get-ChildItem -LiteralPath $gameDir -Recurse -Depth 2 -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.rpf', '.xvd' } | Select-Object -First 1)
 
 # 3. Inspect PE import table so DLSSFG-TWEAK uses the exact imported DLL (winmm.dll for VIctory)
@@ -162,10 +178,30 @@ $proxyOrder = @('version.dll', 'winmm.dll', 'dbghelp.dll', 'dinput8.dll', 'dxgi.
 $chosenProxy = ($proxyOrder | Where-Object { $imports -contains $_ } | Select-Object -First 1)
 if (-not $chosenProxy) { $chosenProxy = 'winmm.dll' }
 
-if (-not $CacheRoot) { $CacheRoot = Join-Path $victoryDir 'cache' }
+# Keep cache and data strictly OUTSIDE any .victory-root repository (asset-policy rule)
+$inRepo = Find-VictoryRepoRoot $victoryDir
+$storageBase = $victoryDir
+if ($inRepo) {
+    $repoParent = Split-Path $inRepo
+    $candidateBase = if ($repoParent) { Join-Path $repoParent 'VIctory-Slim_Shady-Data' } else { $null }
+    if ($candidateBase -and -not (Find-VictoryRepoRoot $candidateBase)) {
+        $storageBase = $candidateBase
+    } else {
+        $storageBase = Join-Path $env:LOCALAPPDATA 'victory-slim-shady'
+    }
+    # Clean up any leftover cache/data directories accidentally created inside target\release\
+    foreach ($staleInside in @((Join-Path $victoryDir 'cache'), (Join-Path $victoryDir 'data'))) {
+        if (Test-Path -LiteralPath $staleInside) {
+            Remove-Item -LiteralPath $staleInside -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+if (-not $CacheRoot -or (Find-VictoryRepoRoot $CacheRoot)) {
+    $CacheRoot = Join-Path $storageBase 'cache'
+}
 $build = (Get-FileHash -LiteralPath $Victory -Algorithm SHA256).Hash.Substring(0, 16).ToLower()
 $cacheDir = Join-Path $CacheRoot "build-$build"
-$dataDir  = Join-Path $victoryDir 'data'
+$dataDir  = Join-Path $storageBase 'data'
 $slRoot   = Join-Path $victoryDir 'nvidia-sdk'
 $slDir    = Join-Path $slRoot 'Streamline\bin\x64'
 if (-not (Test-Path -LiteralPath (Join-Path $slDir 'sl.interposer.dll')) -and (Test-Path -LiteralPath (Join-Path $repoRoot 'nvidia-sdk\Streamline\bin\x64\sl.interposer.dll'))) {
