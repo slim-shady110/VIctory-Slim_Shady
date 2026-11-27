@@ -117,6 +117,12 @@ if (-not $Exe) {
         (Join-Path $repoRoot $Game),
         (Join-Path (Get-Location) $Game)
     )
+    $p1 = Split-Path $repoRoot
+    if ($p1) {
+        $candidates += (Join-Path $p1 $Game)
+        $p2 = Split-Path $p1
+        if ($p2) { $candidates += (Join-Path $p2 $Game) }
+    }
     foreach ($drv in (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -ne 'C' })) {
         foreach ($sub in @('GTA6\Game', 'GTA6_Xbox\Game', 'Games\GTA6\Game', 'Game')) {
             $candidates += (Join-Path $drv.Root "$sub\$Game")
@@ -257,14 +263,14 @@ if ($Fresh -and (Test-Path -LiteralPath $cacheDir)) {
 Get-ChildItem -LiteralPath $CacheRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'build-*' -and $_.Name -ne "build-$build" } | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
-$home = Join-Path $env:LOCALAPPDATA 'victory'
-if (Test-Path -LiteralPath (Join-Path $home 'cache')) {
-    Remove-Item -LiteralPath (Join-Path $home 'cache') -Recurse -Force -ErrorAction SilentlyContinue
+$victoryAppData = Join-Path $env:LOCALAPPDATA 'victory'
+if (Test-Path -LiteralPath (Join-Path $victoryAppData 'cache')) {
+    Remove-Item -LiteralPath (Join-Path $victoryAppData 'cache') -Recurse -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
 
 if ($ClearDriverCache -or -not (Test-Path -LiteralPath (Join-Path $cacheDir '.dxcache-cleared'))) {
-    $menuFile = Join-Path $home 'victory-settings.txt'
+    $menuFile = Join-Path $victoryAppData 'victory-settings.txt'
     if (Test-Path -LiteralPath $menuFile) {
         Move-Item -LiteralPath $menuFile -Destination "$menuFile.$(Get-Date -Format yyyyMMdd-HHmmss).bak" -Force
     }
