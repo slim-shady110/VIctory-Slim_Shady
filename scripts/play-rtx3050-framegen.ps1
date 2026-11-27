@@ -368,12 +368,16 @@ if ($FrameGen -ne 'Off') {
 Enabled=1
 
 [FrameGeneration]
-Engine=DLSS
+Engine=XeSS
 MaxGeneratedFrames=1
 
 [DLSSG]
 Optimized=2
 Preset=C
+
+[XeSSFG]
+FlowResolution=Coarse
+UseHudless=0
 
 [Logging]
 Level=1
@@ -441,18 +445,34 @@ if ($Warm) {
     $ErrorActionPreference = $prev
 }
 
-# 8. Tuned 4 GB VRAM (~3.3 GB WDDM) + 24-32 GB DDR4 Settings
-$room = switch ($FrameGen) { 'On' { '68' } 'Ready' { '76' } default { '84' } }
+# 8. Tuned 4 GB VRAM (~3.3 GB WDDM) + 24-32 GB DDR4 Settings (calibrated from live F3 HUD telemetry)
+# Live 4 GB telemetry showed:
+#   - Idle Streamline FrameGen without DLSSFG-TWEAK still reserves ~1.5 GB VRAM (pushing 3.2 GB -> 4.7/3.3 GB & 206ms PCIe thrashing!)
+#   - VICTORY_LEVELS_ON_DEMAND=1 + VICTORY_LEVELS_MIN_KB=256 + VICTORY_TEXTURE_BUDGET_MB=896 keeps active mips sharp inside 3.3 GB
+#   - VICTORY_AMBIENT=1.35 + VICTORY_AMBIENT_SHADE=0.55,0.5 lifts crushed indoor/clothing shadows cleanly
+$gpuName = try { (& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1) } catch { '' }
+$hasSm86Mod = (Test-Path -LiteralPath (Join-Path $victoryDir $chosenProxy)) -and (Test-Path -LiteralPath (Join-Path $victoryDir 'dlssg_sm86'))
+$effectiveFg = $FrameGen
+if ($FrameGen -ne 'Off' -and $gpuName -match 'RTX\s*(20|30)\d\d' -and -not $hasSm86Mod) {
+    Say "Note: $gpuName without DLSSFG-TWEAK beside victory.exe: disabling Streamline FG reserve (-1.5 GB VRAM!) so VRAM stays under 3.3 GB." Yellow
+    $effectiveFg = 'Off'
+}
+
+$texBudgetMb = if ($SeriesX) { '1536' } elseif ($effectiveFg -eq 'On') { '640' } else { '896' }
 $set = [ordered]@{
-    VICTORY_LEVELS_ON_DEMAND         = '1'
-    VICTORY_CARD_ROOM_FOR_TARGETS_MB = if ($SeriesX) { '1024' } else { '768' }
-    VICTORY_TEXTURE_ROOM_PERCENT     = $room
-    VICTORY_CARD_BUFFERS_MIN_KB      = '1024'
-    VICTORY_CARD_BUFFERS_MB          = '320'
+    VICTORY_LEVELS_ON_DEMAND         = '1'        # Essential on 4 GB: maps only active mips on demand
+    VICTORY_LEVELS_MIN_KB            = '256'      # Tiles 256 KB+ textures too so 64 MB pool slabs don't bloat VRAM
+    VICTORY_TEXTURE_BUDGET_MB        = $texBudgetMb # Tight direct cap on mapped textures so VRAM stays <= 3.2/3.3 GB (no PCIe thrashing!)
+    VICTORY_TEXTURE_ROOM_PERCENT     = '92'
+    VICTORY_CARD_ROOM_FOR_TARGETS_MB = if ($SeriesX) { '640' } else { '256' }
+    VICTORY_CARD_BUFFERS_MIN_KB      = '2048'     # Only >=2 MB hot buffers in GDDR6; smaller buffers use 24-32 GB DDR4 RAM
+    VICTORY_CARD_BUFFERS_MB          = '192'
     VICTORY_CARD_WINDOWS_MB          = '0'
+    VICTORY_AMBIENT                  = '1.35'     # Lifts dark indoor rooms & backlit clothing shadows
+    VICTORY_AMBIENT_SHADE            = '0.55,0.5' # Softer crease darkening so interiors/characters aren't crushed black
     VICTORY_FRAMEGEN_HUDLESS         = '0'
     VICTORY_ASYNC_SUBMIT             = '1'
-    VICTORY_PIPELINE_WAIT_MS         = '10000'
+    VICTORY_PIPELINE_WAIT_MS         = '2500'     # Smooth pacing without Windows "(Not Responding)" freezes
     VICTORY_PIPELINE_WORKERS         = '6'
     VICTORY_JOIN_PARTS               = '6'
     VICTORY_DYNAMIC_SLOTS            = '524288'
@@ -463,7 +483,7 @@ foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 
 $runArgs = @('play', $Exe, '--dlss', $Dlss, '--fps', "$Fps")
 if (-not $SeriesX) { $runArgs += '--series-s' }
-switch ($FrameGen) {
+switch ($effectiveFg) {
     'On'  { $runArgs += @('--framegen', '2') }
     'Off' { $runArgs += '--no-framegen-ready' }
 }
